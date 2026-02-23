@@ -1,0 +1,676 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage{longtable}
+\usepackage{fancyhdr}
+\usepackage[numbers]{natbib}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{ORS Assignment 2}
+\lhead{PMAA Cloud Removal}
+\cfoot{\thepage}
+\sloppy
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    citecolor=blue!70!black,
+    urlcolor=blue!70!black,
+}
+
+\begin{document}
+
+% ── Header ──
+\begin{center}
+{\Large\textbf{Cloud Removal from Multi-Temporal Satellite Imagery Using PMAA}}\\[0.3cm]
+{\normalsize Optical Remote Sensing --- Assignment 2}\\[0.3cm]
+{\normalsize
+Goni Anagha (2023101124) \quad Gandlur Valli (2023102068) \quad Nunna Sri Abhinaya (2023102071) \quad Vishakha (2023101040)}\\[0.2cm]
+{\small IIIT Hyderabad \quad $\mid$ \quad February 2026}
+\end{center}
+\vspace{0.5cm}
+
+% ════════════════════════════════════════════════════════════
+% 1. ABSTRACT
+% ════════════════════════════════════════════════════════════
+
+\section{Abstract}
+
+This report presents our implementation and evaluation of PMAA (Progressive Multi-scale Attention Autoencoder) for cloud removal from Sentinel-2 multi-temporal satellite imagery over the Sangareddy district of Telangana, India. The PMAA model, originally proposed by Zou et al.\ (ECAI 2023), was designed and benchmarked on the Sen2\_MTC datasets consisting of pre-cropped 256$\times$256 patches. Our work extends this to district-scale inference over a region of approximately 96.5$\times$111.7~km at 10~m resolution, requiring a custom end-to-end pipeline spanning data acquisition via Google Earth Engine (GEE), data preprocessing, memory-efficient tiled inference on the Ada HPC cluster, overlap-blend stitching, and quantitative evaluation against a median composite reference. We report per-patch PSNR of 24.35$\pm$2.67~dB (no-blend) and 24.15$\pm$2.10~dB (overlap-blend) with SSIM of 0.686$\pm$0.208 and 0.684$\pm$0.210, respectively, across 818 evaluated patches. We document the numerous technical challenges encountered during this process, including GEE data type mismatches, out-of-memory issues on the HPC cluster, and the considerations of applying a model trained on low cloud-cover data ($\leq$30\%) to Indian monsoon imagery (30--85\%).
+
+
+% ════════════════════════════════════════════════════════════
+% 2. INTRODUCTION
+% ════════════════════════════════════════════════════════════
+
+\section{Introduction}
+
+Optical satellite imagery from platforms such as Sentinel-2 is indispensable for applications in agriculture, urban planning, and environmental monitoring. However, cloud cover remains a persistent obstacle, particularly in tropical and monsoon-affected regions where the majority of optical acquisitions can be rendered unusable for extended periods.
+
+Multi-temporal cloud removal methods address this challenge by exploiting the fact that clouds typically appear in different spatial locations across temporally adjacent acquisitions. By combining information from multiple cloudy images of the same area, these methods can reconstruct a cloud-free composite. The key assumption, often termed \textit{temporal} or \textit{spatial complementarity}, is that for each pixel location, at least one of the input images provides a clear observation.
+
+In this assignment, we implement and evaluate the PMAA model~\cite{zou2023pmaa} for cloud removal over the Sangareddy district of Telangana, India. PMAA is a lightweight autoencoder (3.44~M parameters) that achieves state-of-the-art performance on the Sen2\_MTC benchmarks while requiring only 0.5\% of the parameters and 14.6\% of the computational cost of the previous best model (CTGAN). The general pipeline for multi-temporal cloud removal is illustrated in Figure~\ref{fig:pipeline}.
+
+Our contributions include:
+\begin{enumerate}[leftmargin=2em]
+    \item A complete GEE data extraction pipeline with configurable cloud thresholds and a spatial complementarity analysis module.
+    \item A custom district-scale inference pipeline with memory-efficient streaming, overlap-blend stitching, and comprehensive evaluation.
+    \item Detailed documentation of all technical challenges encountered and their resolutions.
+    \item Quantitative and qualitative analysis of the results compared to the original paper's benchmarks.
+\end{enumerate}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.55\textwidth]{figures/fig2_pipeline.png}
+    \caption{A pipeline for the cloud removal task using multi-temporal satellite imagery (from Zou et al.~\cite{zou2023pmaa}). Input is multiple cloudy images of the same location at adjacent time steps, and output is a cloud-free image of the corresponding location.}
+    \label{fig:pipeline}
+\end{figure}
+
+
+% ════════════════════════════════════════════════════════════
+% 3. ALGORITHM: WORKING OF PMAA
+% ════════════════════════════════════════════════════════════
+
+\section{Working of the PMAA Algorithm}
+
+\subsection{Overview}
+
+PMAA (Progressive Multi-scale Attention Autoencoder) is a multi-temporal cloud removal architecture proposed by Zou et al.~\cite{zou2023pmaa} and published at ECAI 2023 (Oral). The model takes three temporally adjacent cloudy satellite images as input and produces a single cloud-free reconstruction. The source code and pretrained weights are publicly available at \url{https://github.com/XavierJiezou/PMAA}.
+
+\subsection{Architecture}
+
+The PMAA architecture, illustrated in Figure~\ref{fig:architecture}, consists of three main stages:
+
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{Feature Extraction (Encoder):} Each of the three input images is independently processed by a shared-weight feature extractor. This module consists of an initial convolutional layer followed by six bottleneck blocks with dilated convolutions (dilation rate~$= 2$) and an ASPP (Atrous Spatial Pyramid Pooling) module with atrous rates $\{12, 24, 36\}$. Each feature extractor also produces an auxiliary cloud detection mask via a dedicated cloud detection module and a preliminary per-image reconstruction. The encoder downsamples through multiple stages using depthwise separable convolutions with kernel size $3 \times 3$ and stride $2 \times 2$, producing features at progressively coarser spatial resolutions. After $N$ downsampling stages, we obtain $N+1$ multi-scale feature maps $\{\mathbf{F}_i \in \mathbb{R}^{C \times \frac{H}{2^i} \times \frac{W}{2^i}} \mid i = 0, \ldots, N\}$, where $C$ is the number of feature channels. All convolutional layers are followed by instance normalisation and ReLU activation.
+    
+    \item \textbf{Multi-scale Attention Module (MAM):} The extracted features from all three inputs are concatenated along the channel dimension and fed into the MAM. The MAM employs a progressive multi-scale fusion strategy comprising three components:
+    
+    \textit{Multi-scale Fusion.} All features $\{\mathbf{F}_i\}$ are compressed to a uniform scale $(\frac{H}{2^N}, \frac{W}{2^N})$ using adaptive average pooling, then fused by summation to obtain a multi-scale representation:
+    \begin{equation}
+        \mathbf{F}_{\text{ms}} = \sum_{i=0}^{N} H(\mathbf{F}_i),
+    \end{equation}
+    where $H(\cdot)$ represents adaptive average pooling to the target resolution.
+    
+    \textit{Transformer Layer.} The fused features $\mathbf{F}_{\text{ms}}$ are processed by a simplified transformer layer (Figure~\ref{fig:lim}a) that replaces standard self-attention with large-kernel ($11\times11$) depthwise convolutions. This design captures long-range contextual dependencies while being computationally efficient. The self-attention is followed by a feed-forward network (FFN) consisting of depthwise convolution and two linear layers. The output is a global attention feature $\mathbf{F}_g$.
+    
+    \textit{Selective Attention.} The global attention feature $\mathbf{F}_g$ is used to perform adaptive feature recalibration on each $\mathbf{F}_i$ before it enters the decoder. Specifically, $\mathbf{F}_g$ is upsampled to match the spatial dimension of each $\mathbf{F}_i$, and a sigmoid-gated modulation is applied to obtain modulated features $\{\mathbf{F}'_i\}$.
+    
+    \item \textbf{Decoder with Local Interaction Module (LIM):} The decoder reconstructs the cloud-free image through progressive upsampling. At each scale, the LIM (Figure~\ref{fig:lim}b) fuses the global features from the MAM with local skip-connection features using learned sigmoid gating. Specifically, the global feature $\mathbf{O}_i$ is upsampled and passed through a sigmoid activation to produce gate weights, which are multiplied element-wise with the local feature $\mathbf{F}'_{i+1}$. A residual connection adds the convolutionally modulated result to produce a refined feature $\mathbf{O}_{i+1}$ containing both global and local information. The final output passes through a $1\times1$ convolution and a $\tanh$ activation to produce the cloud-free reconstruction in the normalised range $[-1, 1]$.
+\end{enumerate}
+
+The model is trained using L1 loss between the generated cloud-free image and the ground truth, with a progressive learning strategy that breaks the complex reconstruction task into smaller, more tractable stages. Each preliminary stage lays the foundation for subsequent refinement.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/fig3_architecture.png}
+    \caption{PMAA architecture overview (from Zou et al.~\cite{zou2023pmaa}). The encoder downsamples input images $N$ times. Multi-scale features are fused by average pooling and summation. A simplified transformer layer processes the fused features to obtain global attention, which modulates the multi-scale features. The decoder uses the Local Interaction Module to recover fine-grained details.}
+    \label{fig:architecture}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/fig4_lim.png}
+    \caption{(a) Transformer Layer: uses large-kernel ($11\times11$) depthwise convolution for efficient self-attention, followed by a feed-forward network (FFN). (b) Local Interaction Module (LIM): fuses local features from skip connections with global features from the transformer layer using convolutional modulation and sigmoid-gated element-wise product to obtain a refined feature (from Zou et al.~\cite{zou2023pmaa}).}
+    \label{fig:lim}
+\end{figure}
+
+\subsection{Key Design Decisions Identified from the Repository}
+
+To deploy PMAA on our custom data, we examined several key files in the repository to determine the exact input format and model parameters required:
+
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{Model architecture file:} The model's default configuration uses 64 hidden channels and 3 output channels (RGB). However, an alternative configuration with 32 hidden channels and 4 output channels is supported for 4-channel Sentinel-2 data (B2, B3, B4, B8). This is the configuration used by the pretrained weights trained on the Sen2\_MTC\_New dataset.
+    
+    \item \textbf{Input format:} The forward pass iterates over the temporal dimension of the input, confirming that the number of temporal inputs ($T$) is determined at runtime from the input tensor shape. The expected input format is $[B, T, C, H, W]$ where $B$ is batch size, $T=3$ temporal inputs, $C=4$ bands, and $H=W=256$ pixels.
+    
+    \item \textbf{Normalisation scheme:} The dataset loading procedure reveals that pixel values in the Sentinel-2 range $[0, 10000]$ are normalised to $[-1, 1]$ via:
+    \begin{equation}
+        x_{\text{norm}} = \frac{x / 10000 - 0.5}{0.5}
+    \end{equation}
+    and denormalised by the inverse operation. The output is likewise in $[-1, 1]$ and must be denormalised to recover surface reflectance values.
+    
+    \item \textbf{Pretrained weights:} We verified compatibility by loading the state dictionary and confirming all weight keys match the 32-hidden-channel, 4-output-channel architecture. The model has approximately 3.44~M trainable parameters.
+    
+    \item \textbf{Fixed temporal dimension:} The architecture is hardcoded to require exactly $T=3$ temporal inputs. This is not explicitly documented in the paper but follows from the feature concatenation in the first decoder block, which expects $\text{hidden\_channels} \times 3$ input channels. Using 2 or 4 inputs would require architectural modifications and retraining.
+\end{itemize}
+
+\subsection{Performance and Efficiency}
+
+Figure~\ref{fig:performance} shows the performance--efficiency comparison from the original paper. PMAA achieves the best PSNR and SSIM on Sen2\_MTC\_New while using only 3.44~M parameters, compared to 642.92~M for CTGAN (the previous state-of-the-art). This represents a 99.5\% reduction in parameter count and an 85.4\% reduction in computational cost (MACs), making PMAA highly suitable for practical deployment on resource-constrained hardware.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.55\textwidth]{figures/fig1_performance.png}
+    \caption{Performance and efficiency comparison on Sen2\_MTC\_New (from Zou et al.~\cite{zou2023pmaa}). Circle area indicates parameter count. PMAA achieves the best performance (PSNR 18.369~dB, SSIM 0.614) with the fewest parameters (3.44~M).}
+    \label{fig:performance}
+\end{figure}
+
+
+% ════════════════════════════════════════════════════════════
+% 4. DATA EXTRACTION AND GEE PIPELINE
+% ════════════════════════════════════════════════════════════
+
+\section{Data Extraction and GEE Pipeline}
+
+\subsection{Study Area}
+
+Sangareddy is a district in the state of Telangana, India, located at approximately 17.6\textdegree{}N, 78.1\textdegree{}E. The district covers an area of approximately 4,464~km$^2$ and exhibits a mix of agricultural land, urban areas, and forested regions. At 10~m Sentinel-2 resolution, the district spans 9,650$\times$11,165 pixels across 4 spectral bands (B2--Blue, B3--Green, B4--Red, B8--NIR).
+
+\subsection{Google Earth Engine Pipeline}
+
+We developed a configurable GEE JavaScript pipeline for data extraction. The pipeline performs the following operations:
+
+\subsubsection{Study Area Definition}
+The district boundary is loaded from an uploaded verified Shapefile asset hosted on GEE, filtered by the district name field to select Sangareddy. This approach was adopted after encountering issues with the GAUL administrative boundaries dataset, which sometimes failed to load or had incorrect geometries for Indian districts.
+
+\subsubsection{Cloudy Image Selection}
+For each defined cloudy period, the pipeline filters the Sentinel-2 Surface Reflectance Harmonized collection by:
+\begin{itemize}[leftmargin=2em]
+    \item Spatial intersection with the study area boundary
+    \item Temporal range (one month per period)
+    \item Cloud cover metadata: $30\% \leq \text{CLOUDY\_PIXEL\_PERCENTAGE} \leq 85\%$
+\end{itemize}
+
+Three cloudy periods were defined for Sangareddy:
+\begin{itemize}[leftmargin=2em]
+    \item August 2024 (30--85\% cloud): 22 qualifying scenes, 62\% cloud over ROI (SCL-based)
+    \item September 2024 (30--85\% cloud): 23 qualifying scenes, 66\% cloud over ROI
+    \item October 2024 (30--85\% cloud): 25 qualifying scenes, 66\% cloud over ROI
+\end{itemize}
+
+These months were selected from the late monsoon and post-monsoon transition period, providing adequate cloud cover for the cloud removal task while still yielding some clear pixels for spatial complementarity. Within each period, a mosaic of all qualifying scenes is created, selecting the last valid pixel at each location.
+
+\subsubsection{Cloud Cover Selection: Our Data vs.\ Training Data}
+
+The choice of 30--85\% cloud cover for our input scenes requires justification in the context of the model's training regime. Both Sen2\_MTC datasets on which PMAA was trained cap cloud cover at $\leq$30\% per patch. Our inputs, drawn from the Indian monsoon season, have 30--85\% scene-level cloud, meaning individual patches may exceed 50--70\% cloud cover.
+
+This cloud cover range was chosen because: (1) the monsoon and post-monsoon months over India rarely produce scenes below 30\% cloud, so lower thresholds yield insufficient data; (2) a minimum of 30\% ensures the images actually contain meaningful cloud coverage for the task; and (3) the 85\% upper bound avoids near-total cloud scenes that provide almost no useful information.
+
+The consequence is that the model operates outside its training distribution for heavily clouded patches. In those regions, the model relies more on learned priors than on observed clear pixels, which may reduce reconstruction accuracy. This training distribution difference is worth noting when interpreting the results.
+
+\subsubsection{Cloud Masking and Spatial Complementarity Analysis}
+
+A critical component of our pipeline is the spatial complementarity analysis, which verifies that the selected input scenes collectively provide sufficient clear observations. For each mosaic, a per-pixel cloud mask is derived from the Scene Classification Layer (SCL) band, where SCL classes 3 (cloud shadow), 8 (cloud medium probability), 9 (cloud high probability), and 10 (thin cirrus) are flagged as cloudy.
+
+The pipeline computes:
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{Per-image clear percentage:} The fraction of the ROI that is cloud-free in each individual input.
+    \item \textbf{Union clear coverage:} The fraction of the ROI that is cloud-free in \textit{at least one} input image. This is computed as the pixelwise OR of all clear masks.
+    \item \textbf{Pairwise overlap:} For each pair of inputs, the fraction of pixels that are clear in both images (redundant observations).
+\end{enumerate}
+
+The temporal complementarity principle is foundational to all multi-temporal cloud removal methods: cloud coverage varies across acquisitions, enabling different images to contribute clear observations at different locations. The AllClear benchmark~\cite{zhao2024allclear} noted that model performance decreases when all input images are cloudy at the same location, particularly when the model was trained on images with less than 50\% cloud coverage.
+
+For our Sangareddy data, the spatial complementarity analysis yielded the following results:
+
+\begin{table}[H]
+\centering
+\caption{Spatial complementarity analysis results from GEE console output.}
+\label{tab:complementarity}
+\begin{tabular}{lc}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+\multicolumn{2}{l}{\textit{Per-image clear percentage over ROI}} \\
+\quad Oct 2024 & 34\% \\
+\quad Aug 2024 & 38\% \\
+\quad Sep 2024 & 34\% \\
+\midrule
+\multicolumn{2}{l}{\textit{Pairwise both-clear overlap}} \\
+\quad Oct $\cap$ Aug & 14\% \\
+\quad Oct $\cap$ Sep & 12\% \\
+\quad Aug $\cap$ Sep & 13\% \\
+\midrule
+Union clear coverage (clear in $\geq$1 input) & 73\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The union clear coverage of 73\% means that 27\% of the district was clouded in all three inputs. The low pairwise overlaps (12--14\%) indicate that the clear regions across inputs are largely non-overlapping, which is beneficial for complementarity but also means there is limited redundancy for quality assurance. We chose to proceed with this data configuration given the constraints of the monsoon season. A spatial coverage map is also exported, visualising permanently clouded pixels in red --- these are regions where PMAA relies on learned priors without any clear observation from the inputs.
+
+\subsubsection{Clean Reference Composite}
+
+The reference image for evaluation is a temporal median composite of all Sentinel-2 scenes with $<$10\% cloud cover from November--December 2024, after applying QA60-based cloud masking. A total of 51 qualifying clean scenes were identified in this period. The median reducer was chosen over simple mosaicking to minimise residual cloud contamination by selecting the statistically central observation at each pixel.
+
+\subsubsection{Exported Products}
+
+The following products were exported to Google Drive at 10~m resolution (except SCL at 20~m):
+
+\begin{table}[H]
+\centering
+\caption{GEE exported data products for Sangareddy district.}
+\label{tab:exports}
+\begin{tabular}{lccr}
+\toprule
+\textbf{Product} & \textbf{Bands} & \textbf{Resolution} & \textbf{Size} \\
+\midrule
+Aug 2024 cloudy mosaic & B2, B3, B4, B8 & 10 m & 354 MB \\
+Sep 2024 cloudy mosaic & B2, B3, B4, B8 & 10 m & 346 MB \\
+Oct 2024 cloudy mosaic & B2, B3, B4, B8 & 10 m & 355 MB \\
+Nov--Dec 2024 median reference & B2, B3, B4, B8 & 10 m & 342 MB \\
+Nov--Dec 2024 reference SCL & SCL & 20 m & 1.2 MB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Training Dataset Characteristics}
+
+The PMAA model was originally trained and evaluated on two benchmark datasets:
+
+\textbf{Sen2\_MTC\_Old}~\cite{sarukkai2020cloud}: Created from publicly available Sentinel-2 images, containing 945 tiles with 3,130 image pairs. Each triplet consists of three cloudy images and one cloud-free ground truth, all of size 256$\times$256$\times$4 (RGB + NIR) with pixel values in $[0, 255]$. The dataset is split 8:1:1 for train/validation/test.
+
+\textbf{Sen2\_MTC\_New}~\cite{huang2022ctgan}: Also from Sentinel-2, containing approximately 50 non-overlapping tiles with ${\sim}$70 pairs per tile. Same format as Sen2\_MTC\_Old except pixel values are in $[0, 10000]$ (Sentinel-2 surface reflectance units). Split 7:1:2 for train/validation/test. This is the dataset on which our pretrained weights were trained.
+
+Both datasets cap cloud cover at $\leq$30\% per patch, creating the training distribution mismatch discussed in Section~4.2.3.
+
+
+% ════════════════════════════════════════════════════════════
+% 5. DATA FORMATTING ISSUES
+% ════════════════════════════════════════════════════════════
+
+\section{Data Formatting Issues}
+
+\subsection{The float64 Problem}
+
+One of the most significant data issues we encountered involved the reference composite data type. GEE's median reducer outputs 64-bit floating-point data regardless of the input data type, while the mosaic operation preserves the native 16-bit integer format of Sentinel-2. This had three consequences:
+
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{Storage inflation:} The reference file was 3.1~GB (at 8 bytes per pixel) instead of the expected ${\sim}$1.2~GB (at 2 bytes per pixel) --- a 2.5$\times$ increase in file size.
+    
+    \item \textbf{NaN contamination:} Approximately 56.9\% of reference pixels were NaN, corresponding to locations where no cloud-free observation existed in the November--December window. Without treatment, these NaN values propagated through PSNR and SSIM computations, producing undefined results.
+    
+    \item \textbf{Pre-merged file corruption:} A pre-merged reference file created by Google Drive's automatic tile merging (from four GEE export tiles) was uploaded to the HPC cluster without verification. This file had corrupted values that caused the evaluation to report 0 valid patches.
+\end{enumerate}
+
+The resolution involved: (1) replacing the corrupted pre-merged file with a properly merged version from the original tiles; (2) converting NaN values to zero; and (3) clipping data to the valid Sentinel-2 range $[0, 10000]$ for consistent handling during evaluation.
+
+
+% ════════════════════════════════════════════════════════════
+% 6. INFERENCE PIPELINE
+% ════════════════════════════════════════════════════════════
+
+\section{Inference Pipeline}
+
+\subsection{Input Requirements}
+
+Based on our analysis of the PMAA repository (Section~3.3), the model expects:
+
+\begin{itemize}[leftmargin=2em]
+    \item \textbf{Input tensor shape:} $[B, 3, 4, 256, 256]$ --- batch of 3 temporal images, each with 4 bands (B2, B3, B4, B8) at 256$\times$256 pixels.
+    \item \textbf{Normalisation:} Pixel values normalised from $[0, 10000]$ to $[-1, 1]$ via Equation~(2).
+    \item \textbf{Output:} $[B, 4, 256, 256]$ tensor in $[-1, 1]$, denormalised to $[0, 10000]$ via the inverse transform.
+    \item \textbf{Pretrained weights:} Trained on Sen2\_MTC\_New with 32 hidden channels and 4 output channels, approximately 3.44~M parameters.
+\end{itemize}
+
+\subsection{Custom Inference Script}
+
+Since PMAA provides no public inference script for custom data (only evaluation scripts for the Sen2\_MTC dataset format), we developed a comprehensive district-scale inference pipeline of approximately 745 lines that implements the following seven-stage workflow:
+
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{Tile Merging:} GEE exports large regions as multiple spatial tiles. Our pipeline detects split tiles by matching filename suffixes and merges them automatically using geospatial libraries that handle coordinate alignment and data type preservation.
+    
+    \item \textbf{File Discovery:} The pipeline automatically locates all exported GeoTIFF files by matching the district prefix and known temporal keys (e.g., ``aug2024'', ``sep2024'', ``oct2024'', ``novdec2024med'').
+    
+    \item \textbf{Data Loading:} Loads cloudy images in their native 16-bit integer format for memory efficiency, converting to 32-bit floating-point only at the patch level during inference.
+    
+    \item \textbf{Model Loading:} Loads the PMAA model with the 32-hidden-channel, 4-output-channel configuration. All batch normalisation layers are replaced with instance normalisation, since batch normalisation requires batch statistics that are undefined during single-image inference.
+    
+    \item \textbf{Dual-Mode Inference:} Runs inference twice:
+    \begin{itemize}
+        \item \textbf{No-Blend} (overlap $= 0$): Direct tiling with non-overlapping 256$\times$256 patches.
+        \item \textbf{Overlap-Blend} (overlap $= 64$~px): Overlapping patches with cosine-weighted blending.
+    \end{itemize}
+    
+    \item \textbf{Evaluation:} Per-patch PSNR and SSIM against the reference, with cloud masking using the SCL band. Patches where the reference is predominantly empty (mean $< 1.0$) or cloudy ($>$50\% cloud by SCL) are excluded.
+    
+    \item \textbf{Visualisation:} Generates input overview, results comparison, patch showcase, and blend zoom images.
+\end{enumerate}
+
+\subsection{Memory-Efficient Streaming Inference}
+
+District-scale inference poses significant memory challenges. The Sangareddy district at 10~m resolution comprises 9,650$\times$11,165 pixels across 4 bands per image, with three temporal inputs. Loading all data in 32-bit floating-point format would require approximately 12~GB for the cloudy images alone, plus the output array, reference data, and model weights.
+
+Our initial implementation loaded all images in floating-point and extracted all patches into memory before inference. This required ${\sim}$28~GB peak memory, exceeding the allocated 20--30~GB on the HPC cluster. Four consecutive jobs were terminated by the memory manager before we resolved this.
+
+Our streaming approach resolves this by:
+
+\begin{enumerate}[leftmargin=2em]
+    \item Keeping all images in native 16-bit integer format (${\sim}$1.5~GB total vs.\ ${\sim}$12~GB in floating-point).
+    \item Extracting and normalising patches on-the-fly per batch during inference.
+    \item Writing the output incrementally to a pre-allocated accumulator array.
+    \item Processing in batches of 8 patches to bound GPU memory usage.
+\end{enumerate}
+
+The patch grid determines the number of rows and columns of patches, applies zero-padding to the image edges where the image dimensions are not exact multiples of the patch size, and returns the list of spatial coordinates for each patch.
+
+\subsection{Overlap-Blend Stitching}
+
+Non-overlapping patch-based inference produces visible block artifacts at 256-pixel boundaries (see Figure~\ref{fig:blend_zoom}). This occurs because each patch is processed independently, and the model's predictions at patch edges are not constrained to be consistent with adjacent patches. The PMAA paper evaluates on pre-cropped patches and does not address large-image stitching, so block artifacts are entirely a consequence of our tiling approach.
+
+We implemented overlap-blend stitching with cosine-weighted windows to eliminate these artifacts:
+
+\begin{enumerate}[leftmargin=2em]
+    \item Patches are extracted with a stride of $\text{patch\_size} - \text{overlap} = 256 - 64 = 192$ pixels, so each pixel in the overlap region is covered by multiple patches.
+    
+    \item Each patch prediction is multiplied by a 2D cosine weight function:
+    \begin{equation}
+        w_{1\text{D}}(i) = \frac{1}{2}\left(1 - \cos\left(\frac{\pi \cdot i}{\text{overlap}}\right)\right), \quad i \in [0, \text{overlap})
+    \end{equation}
+    \begin{equation}
+        W_{2\text{D}} = w_{1\text{D}}^{\text{row}} \otimes w_{1\text{D}}^{\text{col}}
+    \end{equation}
+    where $w_{1\text{D}}$ ramps from 0 to 1 over the overlap region, is 1 in the interior, and ramps back to 0. The 2D weight is the outer product of the row and column weights.
+    
+    \item The weighted predictions are accumulated into an output array, and a separate weight accumulator tracks the total weight at each pixel. The final output is the ratio of the accumulated predictions to the accumulated weights.
+\end{enumerate}
+
+This approach is well-established in the image processing literature. Cosine (Hann) window blending is a standard technique for seamless tile stitching, widely used in image mosaicking and texture synthesis~\cite{burt1983multiresolution}. The smooth windowing function ensures that patch edges contribute less to the final output, with the interior of each patch dominating.
+
+
+% ════════════════════════════════════════════════════════════
+% 7. RESULTS
+% ════════════════════════════════════════════════════════════
+
+\section{Results}
+
+\subsection{Input Visualisation}
+
+Figure~\ref{fig:inputs} shows the true-colour (B4--B3--B2) visualisation of the three cloudy input images and the clean reference composite for the Sangareddy district. The cloud patterns across the three months show partial spatial complementarity, with different regions obscured in different acquisitions.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/input_rgb.png}
+    \caption{True-colour (B4--B3--B2) composites of the three cloudy inputs (Oct 2024, Aug 2024, Sep 2024) and the Nov--Dec 2024 median reference, downsampled 4$\times$ for display.}
+    \label{fig:inputs}
+\end{figure}
+
+\subsection{Full-District Results}
+
+Figure~\ref{fig:results} shows the full results comparison, including all three inputs, the reference, both output modes, and difference maps.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/results_comparison.png}
+    \caption{Full results comparison for Sangareddy. Top row: three cloudy inputs and reference. Bottom row: no-blend output, overlap-blend output, and per-pixel absolute difference maps (hot colourmap, 0--1000 reflectance units). The blend output shows smoother transitions with fewer block artifacts.}
+    \label{fig:results}
+\end{figure}
+
+\subsection{No-Blend and Blend GeoTIFF Outputs}
+
+Figures~\ref{fig:noblend_tif} and~\ref{fig:blend_tif} show the full cloud-removed GeoTIFF outputs rendered as true-colour composites.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/noblend_tif.png}
+    \caption{No-blend output GeoTIFF (direct 256$\times$256 tiling, overlap $= 0$) rendered as true-colour composite. Block artifacts are visible at patch boundaries, particularly in homogeneous regions.}
+    \label{fig:noblend_tif}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/blend_tif.png}
+    \caption{Overlap-blend output GeoTIFF (overlap $= 64$~px, cosine weighting) rendered as true-colour composite. Block artifacts are eliminated, producing a spatially coherent output.}
+    \label{fig:blend_tif}
+\end{figure}
+
+\subsection{Blend Comparison (Zoomed)}
+
+Figure~\ref{fig:blend_zoom} provides a detailed 512$\times$512 centre crop comparing the no-blend output (with 256-pixel grid lines showing patch boundaries), the blend output, and the reference.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/blend_zoom.png}
+    \caption{Centre 512$\times$512 crop of Sangareddy. Left: no-blend output with red grid lines at 256-pixel patch boundaries showing visible block artifacts. Centre: overlap-blend output with smooth transitions. Right: reference.}
+    \label{fig:blend_zoom}
+\end{figure}
+
+\subsection{Patch-Level Showcase}
+
+Figure~\ref{fig:patch_showcase} displays five representative patches at different quality levels (worst, 25th percentile, median, 75th percentile, and best by blend PSNR), showing the three cloudy inputs, no-blend output, blend output, reference, and per-pixel difference.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/patch_showcase.png}
+    \caption{Patch showcase (256$\times$256) sorted by blend PSNR. Each row shows: three cloudy inputs, no-blend output, blend output, reference, and absolute difference (blend vs.\ reference). The lower-scoring patches correspond to regions where all three inputs were heavily clouded, requiring the model to rely on learned priors.}
+    \label{fig:patch_showcase}
+\end{figure}
+
+\subsection{Quantitative Metrics}
+
+\subsubsection{Evaluation Protocol}
+
+Our evaluation differs from the original paper's protocol in two important ways:
+
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{Reference quality:} The Sen2\_MTC datasets provide a truly cloud-free ground truth for each triplet, so the paper evaluates on all patches without any masking. Our reference is a \textit{median composite} that may contain residual artefacts, and patches where the reference is predominantly empty or cloudy are excluded from evaluation.
+    
+    \item \textbf{Temporal gap:} Our cloudy inputs span August--October 2024, while the reference covers November--December 2024 --- a 1--3 month gap. Vegetation phenology changes between monsoon and post-monsoon periods introduce genuine surface differences that reduce metrics even for a perfect reconstruction.
+\end{enumerate}
+
+\subsubsection{Metric Definitions}
+
+\textbf{Peak Signal-to-Noise Ratio (PSNR):} Measures pixel-level fidelity:
+\begin{equation}
+    \text{PSNR} = 10 \cdot \log_{10}\left(\frac{d_r^2}{\text{MSE}}\right) \quad \text{where } d_r = 10000 \text{ (Sentinel-2 dynamic range)}
+\end{equation}
+
+\textbf{Structural Similarity Index (SSIM)}~\cite{wang2004image}: Measures perceptual similarity using luminance, contrast, and structural components with Gaussian weighting ($\sigma = 1.5$). Computed per-patch on all 4 channels.
+
+\subsubsection{Results}
+
+\begin{table}[H]
+\centering
+\caption{Quantitative results for Sangareddy district. Values are mean $\pm$ std across 818 evaluated patches.}
+\label{tab:results}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Metric} & \textbf{No-Blend} & \textbf{Overlap-Blend} \\
+\midrule
+PSNR (dB) & 24.348 $\pm$ 2.670 & 24.148 $\pm$ 2.096 \\
+SSIM & 0.6857 $\pm$ 0.2079 & 0.6844 $\pm$ 0.2100 \\
+Evaluated patches & 818 & 818 \\
+Inference time & 100.4~s & 157.1~s \\
+Overlap (px) & 0 & 64 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The no-blend mode scores slightly higher than the blend mode on per-patch metrics despite worse visual quality. This is expected behaviour: evaluation is performed on non-overlapping 256$\times$256 patches, so the no-blend output at each evaluation patch is the ``pure'' model prediction, while the blend output at the same location is a weighted average of overlapping predictions. Averaging slightly reduces per-patch variance and may soften fine details, lowering pixel-level metrics. However, the blend output is perceptually superior due to the elimination of block artifacts. This is a well-known trade-off between pixel-level metrics and perceptual quality.
+
+\subsubsection{Comparison with Paper Benchmarks}
+
+\begin{table}[H]
+\centering
+\caption{Our results compared to the PMAA paper's reported benchmarks.}
+\label{tab:comparison}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Dataset / Setting} & \textbf{PSNR (dB)} & \textbf{SSIM} & \textbf{Patches} \\
+\midrule
+PMAA on Sen2\_MTC\_Old~\cite{zou2023pmaa} & 27.377 & 0.861 & --- \\
+PMAA on Sen2\_MTC\_New~\cite{zou2023pmaa} & 18.369 & 0.614 & --- \\
+\midrule
+Ours: Sangareddy (no-blend) & 24.348 & 0.686 & 818 \\
+Ours: Sangareddy (blend) & 24.148 & 0.684 & 818 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Our PSNR (24.35~dB) substantially exceeds the Sen2\_MTC\_New benchmark (18.37~dB). This does \textit{not} indicate that our model performs better --- the metrics are not directly comparable due to several factors:
+
+\begin{enumerate}[leftmargin=2em]
+    \item \textbf{Different evaluation regime:} The Sen2\_MTC\_New benchmark evaluates on all patches including heavily clouded ones. We skip patches where the reference is invalid, effectively selecting easier patches for evaluation.
+    \item \textbf{Cloud cover distribution:} Sen2\_MTC\_New includes patches with diverse cloud cover levels, while our evaluation is biased towards patches with cleaner reference data.
+    \item \textbf{Dynamic range and normalisation:} Both use the $[0, 10000]$ range with $d_r = 10000$, so this factor is consistent.
+\end{enumerate}
+
+Our SSIM (0.686) modestly exceeds the Sen2\_MTC\_New benchmark (0.614), which is more meaningful as SSIM is less sensitive to the evaluation patch selection bias.
+
+
+% ════════════════════════════════════════════════════════════
+% 8. EXECUTION DETAILS
+% ════════════════════════════════════════════════════════════
+
+\section{Execution Details}
+
+All inference was performed on the Ada HPC cluster at IIIT Hyderabad. The cluster uses the SLURM workload manager for job scheduling.
+
+\begin{table}[H]
+\centering
+\caption{Computational resources used for inference.}
+\label{tab:compute}
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Cluster & Ada HPC, IIIT Hyderabad \\
+Node & gnode045 \\
+GPU & NVIDIA GeForce RTX 2080 Ti (11~GB VRAM) \\
+CPU cores & 10 \\
+RAM allocated & 30~GB \\
+CUDA version & 11.6 \\
+cuDNN version & 8.4.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The SLURM submission script implements a six-stage workflow: (1) loading the required CUDA and cuDNN modules; (2) creating a job-specific workspace on fast scratch storage and copying data and code; (3) installing required dependencies; (4) running the inference script with GPU acceleration; (5) copying results back to persistent storage; and (6) cleaning the temporary workspace.
+
+
+% ════════════════════════════════════════════════════════════
+% 9. CHALLENGES AND RESOLUTIONS
+% ════════════════════════════════════════════════════════════
+
+\section{Challenges and Resolutions}
+
+Throughout this project, we encountered and resolved 23 distinct technical challenges spanning data acquisition, HPC infrastructure, model deployment, and evaluation. The most significant are documented below.
+
+\begin{longtable}{p{0.44\textwidth}p{0.49\textwidth}}
+\toprule
+\textbf{Challenge} & \textbf{Resolution} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Challenge} & \textbf{Resolution} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+
+Model requires exactly $T=3$ temporal inputs; not documented in the paper & Identified by examining the model architecture; selected exactly 3 input dates \\
+\midrule
+No public inference script for custom data & Developed a complete 745-line district-scale inference pipeline from scratch \\
+\midrule
+GAUL administrative boundaries on GEE had incorrect geometries for Indian districts & Uploaded a verified district shapefile as a GEE asset \\
+\midrule
+GEE median reducer outputs 64-bit floating-point instead of native 16-bit integer & Converted data to the correct format and handled NaN values during preprocessing \\
+\midrule
+GEE splits large exports into multiple spatial tiles & Implemented automatic detection and merging of split tiles \\
+\midrule
+Reference file contained ${\sim}$57\% invalid (NaN) pixels & Replaced NaN values with zeros; excluded affected patches from evaluation \\
+\midrule
+Pre-merged reference file was corrupted during file transfer & Rebuilt the reference from original GEE export tiles \\
+\midrule
+Local machine insufficient (16~GB RAM, no suitable GPU) & Migrated to the Ada HPC cluster \\
+\midrule
+Repeated out-of-memory kills on the cluster (4+ failed jobs at 20--30~GB) & Rewrote pipeline to streaming architecture: images kept in 16-bit format, patches extracted on-the-fly \\
+\midrule
+GPU architecture mismatch caused CUDA kernel errors & Targeted a compatible RTX 2080~Ti node explicitly in the job submission \\
+\midrule
+GDAL tile-merging utility not available on compute nodes & Replaced with a library-based merging approach \\
+\midrule
+Evaluation returned 0 valid patches & Traced to corrupted reference; fixed by rebuilding from original tiles and fixing NaN handling \\
+\midrule
+SSIM computation was accidentally disabled during debugging and reported 0.0000 & Re-enabled after identifying the issue; increased available memory to 80~GB \\
+\midrule
+Certain shared filesystem not visible from compute nodes & Used the shared home filesystem for persistent data; set up SSH-based access where needed \\
+\midrule
+Visible 256$\times$256 block artifacts in tiled output & Implemented overlap-blend stitching with cosine-weighted windows \\
+\midrule
+No-blend output scores higher than blend on per-patch metrics despite worse visual quality & Documented as expected: evaluation on non-overlapping patches favours pure predictions over averaged ones \\
+\midrule
+Spatial complementarity of 73\% & 27\% of the district lacks any clear observation across all three inputs; chose to proceed given monsoon-season constraints \\
+\midrule
+Training data capped at $\leq$30\% cloud; our inputs have 30--85\% & Noted as a training distribution difference; chose to proceed given monsoon-season data constraints \\
+\midrule
+1--3 month temporal gap between inputs and reference & Documented as evaluation limitation; surface phenology changes affect metrics \\
+\midrule
+Inference script was hardcoded for a different district & Refactored with configurable district parameters \\
+\midrule
+Target compute node occupied; 1.5-day queue wait & Used cluster status tools to find idle compatible nodes \\
+\midrule
+Different cloud filtering approaches (metadata-level vs.\ pixel-level) & Implemented pixel-level SCL-based cloud masking for accurate per-pixel classification \\
+\midrule
+Login node segfault when reading large ($>$3~GB) GeoTIFF files & Moved data processing to compute nodes with adequate memory \\
+
+\end{longtable}
+
+
+% ════════════════════════════════════════════════════════════
+% 10. CONCLUSION
+% ════════════════════════════════════════════════════════════
+
+\section{Conclusion}
+
+We successfully deployed the PMAA cloud removal model for district-scale inference over Sangareddy, Telangana, achieving PSNR of 24.35~dB and SSIM of 0.686 against a median composite reference. The custom inference pipeline, including memory-efficient streaming and overlap-blend stitching, demonstrates that PMAA can be applied to large-area satellite imagery beyond the pre-cropped patch format of its training data.
+
+The primary considerations for interpreting these results are: (1) the training distribution difference, with the pretrained model trained on $\leq$30\% cloud cover per patch while our monsoon-season inputs have substantially higher cloud cover; (2) the use of a temporal median composite as reference rather than a truly cloud-free single-date acquisition, which introduces phenological differences into the evaluation metrics; and (3) the spatial complementarity of 73\%, leaving 27\% of the district without any clear observation across the three inputs, where the model relies on learned priors for reconstruction.
+
+Future work could include fine-tuning the PMAA model on Indian landscape data with higher cloud cover levels, which is expected to yield meaningful improvements based on the training distribution mismatch analysis. Additionally, incorporating SAR (Synthetic Aperture Radar) data as a complementary cloud-penetrating input could significantly improve reconstruction in permanently clouded regions.
+
+
+% ════════════════════════════════════════════════════════════
+% REFERENCES
+% ════════════════════════════════════════════════════════════
+
+\begin{thebibliography}{9}
+
+\bibitem{zou2023pmaa}
+X.~Zou, K.~Li, J.~Xing, P.~Tao, and Y.~Cui,
+``PMAA: A Progressive Multi-scale Attention Autoencoder Model for High-Performance Cloud Removal from Multi-temporal Satellite Imagery,''
+in \textit{Proc.\ ECAI}, pp.~3165--3172, 2023.
+\\\url{https://github.com/XavierJiezou/PMAA}
+
+\bibitem{sarukkai2020cloud}
+V.~Sarukkai, A.~Jain, B.~Uzkent, and S.~Ermon,
+``Cloud removal from satellite images using spatiotemporal generator networks,''
+in \textit{Proc.\ WACV}, pp.~1796--1805, 2020.
+\\\url{https://doi.org/10.1109/WACV45572.2020.9093564}
+
+\bibitem{huang2022ctgan}
+G.-L.~Huang and P.-Y.~Wu,
+``CTGAN: Cloud transformer generative adversarial network,''
+in \textit{Proc.\ ICIP}, pp.~511--515, 2022.
+\\\url{https://doi.org/10.1109/ICIP46576.2022.9897970}
+
+\bibitem{zhao2024allclear}
+L.~Zhao, A.~Xiang, A.~Kondmann, X.~Zhu, and N.~Cheung,
+``AllClear: A comprehensive dataset and benchmark for cloud removal in satellite imagery,''
+in \textit{Proc.\ NeurIPS}, 2024.
+\\\url{https://allclear.cs.cornell.edu/}
+
+\bibitem{wang2004image}
+Z.~Wang, A.~Bovik, H.~Sheikh, and E.~Simoncelli,
+``Image quality assessment: From error visibility to structural similarity,''
+\textit{IEEE Trans.\ Image Processing}, vol.~13, no.~4, pp.~600--612, 2004.
+\\\url{https://doi.org/10.1109/TIP.2003.819861}
+
+\bibitem{burt1983multiresolution}
+P.~Burt and E.~Adelson,
+``A multiresolution spline with application to image mosaics,''
+\textit{ACM Trans.\ Graphics}, vol.~2, no.~4, pp.~217--236, 1983.
+\\\url{https://doi.org/10.1145/245.247}
+
+\end{thebibliography}
+
+\end{document}
