@@ -1,0 +1,77 @@
+oct2024 scenes (30–85% cloud):
+25
+oct2024 cloud % over ROI (SCL-based):
+66
+aug2024 scenes (30–85% cloud):
+22
+aug2024 cloud % over ROI (SCL-based):
+62
+sep2024 scenes (30–85% cloud):
+23
+sep2024 cloud % over ROI (SCL-based):
+66
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SPATIAL COMPLEMENTARITY REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+% of ROI clear in at least 1 input:
+73
+Threshold for usable set:
+80%
+PASS if coverage >= threshold
+oct2024 clear % over ROI:
+34
+aug2024 clear % over ROI:
+38
+sep2024 clear % over ROI:
+34
+oct2024 ∩ aug2024 both-clear overlap %:
+14
+oct2024 ∩ sep2024 both-clear overlap %:
+12
+aug2024 ∩ sep2024 both-clear overlap %:
+13
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Red pixels on map = permanently clouded across all 3 inputs.
+PMAA cannot recover these without additional input dates.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Clean scenes (2024-11-01 → 2024-12-31, <10% cloud):
+51
+All exports queued. Check Tasks tab.
+oct2024 scenes (30–85% cloud):
+25
+oct2024 cloud % over ROI (SCL-based):
+66
+aug2024 scenes (30–85% cloud):
+22
+aug2024 cloud % over ROI (SCL-based):
+62
+sep2024 scenes (30–85% cloud):
+23
+sep2024 cloud % over ROI (SCL-based):
+66
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SPATIAL COMPLEMENTARITY REPORT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+% of ROI clear in at least 1 input:
+73
+Threshold for usable set:
+80%
+PASS if coverage >= threshold
+oct2024 clear % over ROI:
+34
+aug2024 clear % over ROI:
+38
+sep2024 clear % over ROI:
+34
+oct2024 ∩ aug2024 both-clear overlap %:
+14
+oct2024 ∩ sep2024 both-clear overlap %:
+12
+aug2024 ∩ sep2024 both-clear overlap %:
+13
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Red pixels on map = permanently clouded across all 3 inputs.
+PMAA cannot recover these without additional input dates.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Clean scenes (2024-11-01 → 2024-12-31, <10% cloud):
+51
