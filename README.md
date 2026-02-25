@@ -8,8 +8,9 @@ Cloud removal from multi-temporal Sentinel-2 imagery over **Sangareddy district,
 
 | File | Description |
 |------|-------------|
-| `AS2_report.pdf` | Final report (compiled) |
-| `AS2_report.tex` | LaTeX source for the report |
+| `Geospatial_Analysis_Team_A2.pdf` | Final report (compiled) |
+| `Geospatial_Analysis_Team_A2.tex` | LaTeX source for the report |
+| `Geospatial_Analysis_Team_A2.txt` | Moodle submission text |
 | `gee.js` | Google Earth Engine pipeline for data extraction |
 | `pmaa_ada_inference.py` | Custom district-scale inference script (~745 lines) |
 | `run_pmaa.sh` | SLURM submission script for Ada HPC |
