@@ -11,14 +11,15 @@ Cloud removal from multi-temporal Sentinel-2 imagery over **Sangareddy district,
 | `Geospatial_Analysis_Team_A2.pdf` | Final report (compiled) |
 | `Geospatial_Analysis_Team_A2.tex` | LaTeX source for the report |
 | `Geospatial_Analysis_Team_A2.txt` | Moodle submission text |
-| `gee.js` | Google Earth Engine pipeline for data extraction |
-| `pmaa_ada_inference.py` | Custom district-scale inference script (~745 lines) |
-| `run_pmaa.sh` | SLURM submission script for Ada HPC |
+| `code/gee.js` | Google Earth Engine pipeline for data extraction |
+| `code/pmaa_ada_inference.py` | Custom district-scale inference script (~745 lines) |
+| `code/run_pmaa.sh` | SLURM submission script for Ada HPC |
 | `metrics.txt` | Evaluation results (PSNR, SSIM) |
-| `figures/` | Paper figures used in the report (zipped in `figures.zip`) |
+| `figures/figures.zip` | Report figures including complementarity map |
 | `PMAA_paper.pdf` | Original PMAA paper (Zou et al., ECAI 2023) |
+| `gee_console` | GEE console output |
 
-### Output Visualisations
+### Output Visualisations (`output_images/`)
 
 | File | Description |
 |------|-------------|
@@ -40,15 +41,15 @@ Contents: 3 cloudy mosaics (Aug–Oct 2024), median reference (Nov–Dec 2024), 
 ## Pipeline Overview
 
 ```
-GEE (gee.js)          →  Export cloudy mosaics + reference to Drive
-                          ↓
-Ada HPC (run_pmaa.sh)  →  Copy data to /scratch, run inference
-                          ↓
-Inference script       →  Tile merge → Patch extraction → PMAA forward
-(pmaa_ada_inference.py)    → Overlap-blend stitching → Evaluation → Visualisation
+GEE (code/gee.js)               →  Export cloudy mosaics + reference to Drive
+                                     ↓
+Ada HPC (code/run_pmaa.sh)       →  Copy data to /scratch, run inference
+                                     ↓
+Inference script                 →  Tile merge → Patch extraction → PMAA forward
+(code/pmaa_ada_inference.py)         → Overlap-blend stitching → Evaluation → Visualisation
 ```
 
-### GEE Pipeline (`gee.js`)
+### GEE Pipeline (`code/gee.js`)
 
 - Loads Sangareddy boundary from uploaded shapefile asset
 - Filters Sentinel-2 SR Harmonized: 30–85% cloud cover, Aug–Oct 2024
@@ -56,7 +57,7 @@ Inference script       →  Tile merge → Patch extraction → PMAA forward
 - Builds Nov–Dec 2024 median reference (<10% cloud)
 - Exports 4-band GeoTIFFs (B2, B3, B4, B8) at 10 m resolution
 
-### Inference (`pmaa_ada_inference.py`)
+### Inference (`code/pmaa_ada_inference.py`)
 
 - Loads PMAA with `PMAA(32, 4)` config and `pmaa_new.pth` weights
 - Replaces BatchNorm → InstanceNorm for single-sample inference
@@ -78,8 +79,8 @@ Computed on Ada HPC (RTX 2080 Ti, 30 GB RAM) over 818 evaluated patches.
 
 1. Accept the GEE exports from the Drive link above and place them in a `data/` directory.
 2. Clone the [PMAA repo](https://github.com/XavierJiezou/PMAA) and download `pmaa_new.pth`.
-3. Edit paths in `run_pmaa.sh` and `pmaa_ada_inference.py` to match your setup.
-4. Submit via SLURM: `sbatch run_pmaa.sh`
+3. Edit paths in `code/run_pmaa.sh` and `code/pmaa_ada_inference.py` to match your setup.
+4. Submit via SLURM: `sbatch code/run_pmaa.sh`
 
 ## References
 
