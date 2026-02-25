@@ -1,0 +1,14 @@
+ORS Assignment 2 — Cloud Removal Using PMAA
+
+Team:
+  Goni Anagha          (2023101124)
+  Gandlur Valli        (2023102068)
+  Nunna Sri Abhinaya   (2023102071)
+  Vishakha             (2023101040)
+
+Paper:
+  Zou et al., "PMAA: A Progressive Multi-scale Attention Autoencoder Model
+  for High-Performance Cloud Removal from Multi-temporal Satellite Imagery,"
+  ECAI 2023.
+
+Repository: https://github.com/VishakhaAgrawal27/ORS_ASN2
